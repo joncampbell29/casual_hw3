@@ -1,0 +1,27 @@
+---
+title: "Homework 3"
+author: "Jon Campbell"
+format: pdf
+editor: visual
+---
+
+```{r}
+#| message: false
+library(tidyverse)
+data <- read.delim("rhc.xls", header = TRUE, sep = ",")
+```
+
+### Question 1
+
+```{r}
+
+```
+
+### Question 2
+
+```{r}
+
+
+```
+
+### Question 3
