@@ -8,6 +8,7 @@ editor: visual
 ```{r}
 #| message: false
 library(tidyverse)
+library(glmnet)
 data <- read.delim("rhc.xls", header = TRUE, sep = ",")
 ```
 
@@ -15,6 +16,48 @@ data <- read.delim("rhc.xls", header = TRUE, sep = ",")
 
 ```{r}
 
+data_clean <- data |>
+  mutate(
+    across(c(2,41:54), as.integer),
+    across(c(11:20,22), function(x) if_else(x=="No",0L,1L))
+  )
+
+data_fin <- data |>
+  mutate(
+    across(c(2,41:54), function(x) factor(as.integer(x))),
+    across(c(11:20,22), function(x) factor(if_else(x=="No",0L,1L))),
+    across(c(2,4,5,7:10,23), as.factor)
+  )
+```
+
+```{r}
+
+ps_base <- glm(treatment ~ age + sex + race + edu + income + ..., data = data
+               , family = "binomial")
+
+```
+
+```{r}
+form <- as.formula(paste("treatment~",paste(colnames(data)[3:53], collapse = "+")))
+
+ps_base <- glm(form, data = data, family = "binomial")
+```
+
+```{r}
+# Preparing data for LASSO
+x <- model.matrix(form, data=data)[,-1]
+y <- data$treatment
+
+# LASSO model for variable selection
+cv_fit <- cv.glmnet(x, y, family = "binomial")
+
+# Coefficients from the LASSO model
+lasso_coef <- coef(cv_fit, s = "lambda.min")
+
+selected_variables <- lasso_coef@Dimnames[[1]][lasso_coef[,1] !=0][-1]
+formula <- as.formula(paste("treatment ~", paste(selected_variables[-1]
+                                                 , collapse = "+")))
+ps_model <- glm(formula, data = df, family = "binomial")
 ```
 
 ### Question 2
