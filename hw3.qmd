@@ -12,52 +12,201 @@ library(glmnet)
 data <- read.delim("rhc.xls", header = TRUE, sep = ",")
 ```
 
-### Question 1
-
 ```{r}
 
 data_clean <- data |>
-  mutate(
-    across(c(2,41:54), as.integer),
-    across(c(11:20,22), function(x) if_else(x=="No",0L,1L))
-  )
+  mutate(across(c(treatment,cardiohx:dth30), as.integer)) |>
+  mutate(across(c(resp:ortho,dnr1),function(x) if_else(x=="No",0L,1L))) |>
+  mutate(age = factor(if_else(age>=65,1,0))) |>
+  mutate(across(c(sex:race,income:cat2,ca), as.factor)) |>
+  rename(Z = treatment, Y = dth30)
+  
+```
 
-data_fin <- data |>
-  mutate(
-    across(c(2,41:54), function(x) factor(as.integer(x))),
-    across(c(11:20,22), function(x) factor(if_else(x=="No",0L,1L))),
-    across(c(2,4,5,7:10,23), as.factor)
-  )
+WRITE ABOUT DATA CLEANING PROCESS
+
+### Question 1
+
+```{r}
+mainX <- data_clean |>
+  select(-c(ID,Z,Y))
+
+subgroup_vars <- data_clean |>
+  select(age, sex, race)
+
+
+
+interactions <- c()
+
+for (subg in colnames(subgroup_vars)) {
+  for (cov in colnames(mainX)[-c(1:3)]) {
+    inter <- paste0(subg,":",cov)
+    interactions <- c(interactions, inter)
+  }
+}
+
+
+main_form <- paste(colnames(mainX), collapse = " + ")
+inter_form <- paste(interactions, collapse = " + ")
+full_form <- as.formula(paste("Z ~",main_form,"+",inter_form))
+
+dat <- data_clean |>
+  select(-c(ID,Y))
+
+
+fullX <- model.matrix(full_form, dat)[,-1]
+
+nzv_cols <- apply(fullX, 2, var) != 0
+fullX_nzv <- fullX[, nzv_cols]
+
+fullX_scaled <- scale(fullX_nzv)
+Z <- data_clean$Z
+
+pscore_model <- cv.glmnet(y=Z, x=fullX_scaled
+                          , penalty.factor=c(rep(0, ncol(fullX_scaled[,1:71]))
+                                             ,rep(1, ncol(fullX_scaled)-ncol(fullX_scaled[,1:71])))
+                          , family="binomial", maxit=50000)
+
+
+coef(pscore_model)
+plot(pscore_model)
+coef(pscore_model,s=exp(-5.5))
+nonzero_coef <- rownames(coef(pscore_model
+                              , s=exp(-5.5)))[which(coef(pscore_model, s=exp(-5.5))!=0)][-1]
+
+pscore_postlasso_model <- glm(Z~., data=data.frame(fullX_scaled[,nonzero_coef])
+                        , family="binomial")
+    
+
+pscore_postlasso <- pscore_postlasso_model$fitted.values
 ```
 
 ```{r}
 
-ps_base <- glm(treatment ~ age + sex + race + edu + income + ..., data = data
-               , family = "binomial")
+
 
 ```
 
 ```{r}
-form <- as.formula(paste("treatment~",paste(colnames(data)[3:53], collapse = "+")))
 
-ps_base <- glm(form, data = data, family = "binomial")
+nonzero_coef <- rownames(coef(pscore_model
+                              , s='lambda.min'))[which(coef(pscore_model, s='lambda.min')!=0)][-1]
+
+pscore_postlasso_model <- glm(Z~., data=data.frame(as.matrix(fullX)[,nonzero_coef])
+                        , family="binomial")
+    
+
+pscore_postlasso <- pscore_postlasso_model$fitted.values
+#PS <- cbind(PS, pscore)
+
 ```
 
 ```{r}
-# Preparing data for LASSO
-x <- model.matrix(form, data=data)[,-1]
-y <- data$treatment
 
-# LASSO model for variable selection
-cv_fit <- cv.glmnet(x, y, family = "binomial")
+ow_weights <- Z*(1-pscore_postlasso) + (1-Z)*pscore_postlasso
 
-# Coefficients from the LASSO model
-lasso_coef <- coef(cv_fit, s = "lambda.min")
+ipw_weights <- Z/pscore_postlasso + (1-Z)/(1-pscore_postlasso)
 
-selected_variables <- lasso_coef@Dimnames[[1]][lasso_coef[,1] !=0][-1]
-formula <- as.formula(paste("treatment ~", paste(selected_variables[-1]
-                                                 , collapse = "+")))
-ps_model <- glm(formula, data = df, family = "binomial")
+asd_func <- function(x_j, z, w){
+  # Calculate absolute standardized difference # 
+  # Inputs:
+  # x_j: a vecor of the covariate
+  # z: a vector of treatment indicator
+  # w: a vector of weights
+  delta = abs(sum(x_j*z*w)/sum(z*w) - sum(x_j*(1-z)*w)/sum((1-z)*w))
+  tstat <- delta/sqrt((var(x_j[which(z==1)])+var(x_j[which(z==0)]))/2)
+  return (tstat)
+}
+
+```
+
+```{r}
+check_balance <- function(S, Z, X, weights){
+  # This function evaulate balance overall and within subgroups
+  # Inputs:
+  # S - a n by n_S matrix of subgroup indicators
+  # Z - a vector of treatment indicators
+  # X - a n by n_X matrix ofcovariates
+  # weights - a vector of weights
+  if (anyNA(weights)) {
+    overall_asd <- rep(NA, ncol(X))
+    groups_asd <- matrix(NA, ncol(X), ncol(S)*2)
+    
+    return (list(groups_asd=groups_asd, overall_asd=overall_asd))} else
+      #Calculate overall balance across covariates
+      overall_asd <- apply(X, 2, asd_func, Z, weights)
+    
+    #Calculate balance per subgroup across covariates
+    groups_asd <- c()
+    names_col <- c()
+    
+    for(r in 1:ncol(S)){ 
+      for(g in 1:length(unique(S[,r]))){
+        #ASD
+        #X <- cbind(X,S[,-r])
+        find_g <- which(S[,r]==(g-1))
+        g_asd <- apply(X[find_g, ], 2, asd_func, Z[find_g], weights[find_g])
+        groups_asd <- cbind(groups_asd, g_asd)
+        names_col <- c(names_col, paste(colnames(S)[r],g-1,sep="-"))
+      }
+    }
+    
+    colnames(groups_asd) <- names_col
+    return(list(groups_asd=groups_asd, overall_asd=overall_asd))
+}
+
+```
+
+```{r}
+
+asds <- check_balance(subgroup_vars,Z,mainX[,-c(1:3)],ow_weights)
+subgroup_asds <- asds$groups_asd
+overall_asds <- asds$overall_asd
+print(subgroup_asds)
+```
+
+```{r}
+
+cal_ate_sate <- function(S, Z, weights, Y)#, ATE, SATE)
+  # This function estimates overall and within subgroups causal effect 
+  # and calculate the esterror for ate and sate
+  
+  # Inputs:
+  # S - a n by n_S matrix of subgroup indicators
+  # Z - a vector of treatment indicators
+  # weights - a vector of weights
+  # Y - a vector of outcomes
+  # ATE - true ate
+  # SATE - a 2 by ncol(S) matrix of true SATE
+{
+  #Calculate ATE overall
+  ate_overall <- sum((Z*weights*Y))/sum((weights*Z)) - sum(((1-Z)*weights*Y))/sum((weights*(1-Z)))
+
+  ate_all <- ate_overall
+  
+  #estimated sate 
+  sate <- matrix(NA, nrow=3, ncol=ncol(S))
+  
+  for(r in 1:ncol(S))
+  { 
+    for(g in 1:length(unique(S[,r])))
+    {
+      find_g <- which(S[, r] == (g-1))
+      sate[g, r] <- sum((Z*weights*Y)[find_g])/sum((weights*Z)[find_g]) - sum(((1-Z)*weights*Y)[find_g])/sum((weights*(1-Z))[find_g])
+      
+    }
+  }
+  colnames(sate) <- colnames(S)
+  rownames(sate) <- c("group-0","group-1", "group-2")
+  return(list(
+    ate = ate_all,
+    sate = sate
+  ))
+}
+```
+
+```{r}
+cal_ate_sate(subgroup_vars,Z,ow_weights,data_fin$outcome)
 ```
 
 ### Question 2
